@@ -1,7 +1,4 @@
 name: Build WaveController.exe
-
-# Runs automatically whenever you push to the repo, and can also be
-# triggered manually from the Actions tab ("Run workflow" button).
 on:
   push:
     branches: [ main, master ]
