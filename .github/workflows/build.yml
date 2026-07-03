@@ -1,4 +1,5 @@
 name: Build WaveController.exe
+
 on:
   push:
     branches: [ main, master ]
@@ -20,11 +21,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pygetwindow pystray pillow
+          pip install pyinstaller
 
       - name: Build the exe
         run: |
-          python -m PyInstaller --onefile --windowed --name "WaveController" --clean wavefix.py
+          python -m PyInstaller --onefile --console --name "WaveController" --clean wavefix.py
 
       - name: Upload the exe as a downloadable artifact
         uses: actions/upload-artifact@v4
