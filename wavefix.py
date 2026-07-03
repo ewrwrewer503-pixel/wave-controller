@@ -1,344 +1,161 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import subprocess
-import threading
-import time
 import os
+import subprocess
+import time
+import threading
+import shlex
 import sys
-import ctypes
-import winreg  
-try:
-    import pygetwindow as gw
-    HAVE_GW = True
-except ImportError:
-    HAVE_GW = False
-    
 
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAVE_TRAY = True
-except ImportError:
-    HAVE_TRAY = False
-   
+DEFAULT_EXE_PATH = r"C:\Program Files\Wave\Wave.exe"
+DEFAULT_DELAY = 120
 
-APP_NAME = "WaveController"  
+state = {
+    "exe_path": DEFAULT_EXE_PATH,
+    "delay": DEFAULT_DELAY,
+    "status": "STOPPED",
+}
 
-CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".wavecontroller_config")
+_loop_thread = None
+_stop_flag = threading.Event()
 
 
-DEFAULT_PATH_GUESSES = [
-    "C:/Program Files/Wave/Wave.exe",
-    "C:/Program Files (x86)/Wave/Wave.exe",
-]
+def kill_process(name="Wave.exe"):
+    subprocess.run(
+        ["taskkill", "/f", "/im", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def acquire_single_instance_lock():
-    """Uses a named Windows mutex so a second copy can't run at once.
-    Returns True if this is the only instance, False if another is already running."""
-    mutex_name = "Global\\WaveControllerSingleInstanceMutex"
-    ERROR_ALREADY_EXISTS = 183
-    ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-    return ctypes.GetLastError() != ERROR_ALREADY_EXISTS
-
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                lines = f.read().splitlines()
-            path = lines[0] if len(lines) > 0 else ""
-            delay = lines[1] if len(lines) > 1 else "120"
-            was_running = (lines[2] == "1") if len(lines) > 2 else False
-            return path, delay, was_running
-        except Exception:
-            pass
-
-   
-    for guess in DEFAULT_PATH_GUESSES:
-        if os.path.exists(guess):
-            return guess, "120", False
-    return "", "120", False
-
-
-def save_config(path, delay, was_running):
+def launch_process(path):
     try:
-        with open(CONFIG_FILE, "w") as f:
-            f.write(path + "\n" + delay + "\n" + ("1" if was_running else "0") + "\n")
-    except Exception:
-        pass  
-
-
-def is_in_startup():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                              r"Software\Microsoft\Windows\CurrentVersion\Run",
-                              0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
+        subprocess.Popen(path)
         return True
-    except FileNotFoundError:
+    except Exception as e:
+        print(f"[!] Could not launch: {e}")
         return False
-    except Exception:
-        return False
 
 
-def set_startup(enabled):
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-    if enabled:
-     
-        if getattr(sys, "frozen", False):
-            cmd = f'"{sys.executable}"'
-        else:
-            script = os.path.abspath(__file__)
-            cmd = f'"{sys.executable}" "{script}"'
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-    else:
-        try:
-            winreg.DeleteValue(key, APP_NAME)
-        except FileNotFoundError:
-            pass
-    winreg.CloseKey(key)
+def automation_loop():
+    path = state["exe_path"]
+    launch_process(path)
 
+    while not _stop_flag.is_set():
+        print("[!] Ending task: Wave.exe...")
+        kill_process("Wave.exe")
+        time.sleep(2)
 
-def make_tray_image(color):
-    """Draws a simple filled circle icon for the system tray - no external
-    image file needed."""
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((4, 4, size - 4, size - 4), fill=color)
-    return img
+        if _stop_flag.is_set():
+            break
 
+        print("[!] Reopening Wave.exe...")
+        launch_process(path)
+        time.sleep(1)
 
-class WaveManagerApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Wave Controller")
-        self.root.geometry("450x300")
-        self.root.resizable(False, False)
-
-        self.is_running = False
-        self.current_process = None
-        self.loop_thread = None
-        self.tray_icon = None
-
-        saved_path, saved_delay, was_running = load_config()
-
-        self.exe_path = tk.StringVar(value=saved_path or "C:/Program Files/Wave/Wave.exe")
-        self.delay_seconds = tk.StringVar(value=saved_delay)
-        self.startup_var = tk.BooleanVar(value=is_in_startup())
-
-        self.build_ui()
-
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
-
-        if HAVE_TRAY:
-            self.start_tray_icon()
-
-        self._pending_resume = was_running
-        self.root.after(300, self.autostart)
-
-    def build_ui(self):
-        path_frame = tk.LabelFrame(self.root, text=" Application Settings ", padx=10, pady=10)
-        path_frame.pack(fill="x", padx=15, pady=10)
-
-        tk.Label(path_frame, text="Wave.exe Path:").grid(row=0, column=0, sticky="w")
-        self.path_entry = tk.Entry(path_frame, textvariable=self.exe_path, width=35)
-        self.path_entry.grid(row=0, column=1, padx=5)
-        tk.Button(path_frame, text="Browse", command=self.browse_file).grid(row=0, column=2)
-
-        tk.Label(path_frame, text="Delay (Seconds):").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        vcmd = (self.root.register(self._validate_digits), "%P")
-        self.delay_entry = tk.Entry(path_frame, textvariable=self.delay_seconds, width=10,
-                                     validate="key", validatecommand=vcmd)
-        self.delay_entry.grid(row=1, column=1, sticky="w", padx=5, pady=(10, 0))
-
-        self.startup_check = tk.Checkbutton(
-            path_frame, text="Run automatically when Windows starts",
-            variable=self.startup_var, command=self.on_startup_toggle
-        )
-        self.startup_check.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
-
-        control_frame = tk.Frame(self.root)
-        control_frame.pack(pady=15)
-
-        self.status_label = tk.Label(control_frame, text="Status: STOPPED", fg="red",
-                                      font=("Arial", 10, "bold"))
-        self.status_label.pack(side="left", padx=10)
-
-        self.toggle_btn = tk.Button(control_frame, text="Turn ON", bg="green", fg="white",
-                                     font=("Arial", 11, "bold"), width=12, command=self.toggle_state)
-        self.toggle_btn.pack(side="left", padx=10)
-
-        hint = "Closing this window keeps it running in the system tray."
-        if not HAVE_TRAY:
-            hint = "Tip: install 'pystray' and 'pillow' to enable a tray icon."
-        tk.Label(self.root, text=hint, fg="gray", font=("Arial", 8)).pack(side="bottom", pady=(0, 8))
-
-    def _validate_digits(self, proposed):
-        return proposed == "" or proposed.isdigit()
-
-    def on_startup_toggle(self):
-        try:
-            set_startup(self.startup_var.get())
-        except Exception as e:
-            messagebox.showerror("Startup Error", f"Couldn't update startup setting:\n{e}")
-          
-            self.startup_var.set(not self.startup_var.get())
-
-    def browse_file(self):
-        filename = filedialog.askopenfilename(
-            title="Select Wave.exe",
-            filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
-        )
-        if filename:
-            self.exe_path.set(filename)
-
-    def start_tray_icon(self):
-        menu = pystray.Menu(
-            pystray.MenuItem("Show Wave Controller", self.show_from_tray, default=True),
-            pystray.MenuItem("Turn On/Off", lambda: self.root.after(0, self.toggle_state)),
-            pystray.MenuItem("Exit", self.quit_app),
-        )
-        self.tray_icon = pystray.Icon(
-            APP_NAME, make_tray_image("red"), "Wave Controller (stopped)", menu
-        )
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
-
-    def update_tray_icon(self):
-        if not self.tray_icon:
-            return
-        if self.is_running:
-            self.tray_icon.icon = make_tray_image("green")
-            self.tray_icon.title = "Wave Controller (running)"
-        else:
-            self.tray_icon.icon = make_tray_image("red")
-            self.tray_icon.title = "Wave Controller (stopped)"
-
-    def hide_to_tray(self):
-        if HAVE_TRAY:
-            self.root.withdraw()
-        else:
-            self.root.iconify()
-
-    def show_from_tray(self, icon=None, item=None):
-        self.root.after(0, self.root.deiconify)
-        self.root.after(0, self.root.lift)
-
-    def quit_app(self, icon=None, item=None):
-        self.is_running = False
-        save_config(self.exe_path.get(), self.delay_seconds.get(), False)
-        if self.current_process and self.current_process.poll() is None:
-            try:
-                self.current_process.kill()
-            except Exception:
-                pass
-        if self.tray_icon:
-            self.tray_icon.stop()
-        self.root.after(0, self.root.destroy)
-
-    def autostart(self):
-
-        if self._pending_resume and os.path.exists(self.exe_path.get()):
-            self.toggle_state()
-
-    def toggle_state(self):
-        if not self.is_running:
-            try:
-                int(self.delay_seconds.get() or "0")
-            except ValueError:
-                messagebox.showerror("Error", "Please enter a valid number for seconds.")
-                return
-
-            if not os.path.exists(self.exe_path.get()):
-                messagebox.showerror("Error", "That Wave.exe path doesn't exist. Double check it.")
-                return
-
-            save_config(self.exe_path.get(), self.delay_seconds.get(), True)
-
-            self.is_running = True
-            self.toggle_btn.config(text="Turn OFF", bg="red")
-            self.status_label.config(text="Status: RUNNING", fg="green")
-            self.set_inputs_enabled(False)
-            self.update_tray_icon()
-
-            self.loop_thread = threading.Thread(target=self.automation_loop, daemon=True)
-            self.loop_thread.start()
-        else:
-            self.is_running = False
-            self.toggle_btn.config(text="Turn ON", bg="green")
-            self.status_label.config(text="Status: STOPPED", fg="red")
-            self.set_inputs_enabled(True)
-            self.update_tray_icon()
-            save_config(self.exe_path.get(), self.delay_seconds.get(), False)
-
-    def set_inputs_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
-        self.path_entry.config(state=state)
-        self.delay_entry.config(state=state)
-
-    def automation_loop(self):
-        path = self.exe_path.get()
-
-        try:
-            self.current_process = subprocess.Popen(path)
-        except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Launch Error", f"Could not open Wave: {e}"))
-            self.root.after(0, self.toggle_state)
-            return
-
-        while self.is_running:
-            try:
-                previous_window = gw.getActiveWindow() if HAVE_GW else None
-
-                if self.current_process and self.current_process.poll() is None:
-                    self.current_process.kill()
-                    self.current_process.wait()
-
-                time.sleep(2)
-                if not self.is_running:
-                    break
-
-                self.current_process = subprocess.Popen(path)
-                time.sleep(1.5)
-
-                if previous_window:
-                    try:
-                        previous_window.activate()
-                    except Exception:
-                        pass  
-
-                if not self.is_running:
-                    break
-
-                delay = int(self.delay_seconds.get())
-                for _ in range(delay):
-                    if not self.is_running:
-                        break
-                    time.sleep(1)
-
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Execution Error", str(e)))
-                self.root.after(0, self.toggle_state)
+        print(f"[!] Waiting {state['delay']}s until next restart...")
+        for _ in range(state["delay"]):
+            if _stop_flag.is_set():
                 break
+            time.sleep(1)
+
+    print("[wave] loop exited")
+
+
+def cmd_start():
+    global _loop_thread
+    if state["status"] == "RUNNING":
+        print("[wave] already running")
+        return
+    if not os.path.exists(state["exe_path"]):
+        print(f"[wave] error: path does not exist -> {state['exe_path']}")
+        return
+    _stop_flag.clear()
+    state["status"] = "RUNNING"
+    _loop_thread = threading.Thread(target=automation_loop, daemon=True)
+    _loop_thread.start()
+    print("[wave] started")
+
+
+def cmd_stop():
+    if state["status"] != "RUNNING":
+        print("[wave] not running")
+        return
+    _stop_flag.set()
+    state["status"] = "STOPPED"
+    print("[wave] stopping...")
+
+
+def cmd_status():
+    print(f"path  : {state['exe_path']}")
+    print(f"delay : {state['delay']}s")
+    print(f"status: {state['status']}")
+
+
+def cmd_set(args):
+    if len(args) < 2:
+        print("usage: set path <value>  |  set delay <seconds>")
+        return
+    key, value = args[0].lower(), " ".join(args[1:]).strip('"')
+    if key == "path":
+        state["exe_path"] = value
+        print(f"[wave] path set -> {value}")
+    elif key == "delay":
+        if value.isdigit():
+            state["delay"] = int(value)
+            print(f"[wave] delay set -> {value}s")
+        else:
+            print("[wave] delay must be a number")
+    else:
+        print(f"[wave] unknown setting '{key}'")
+
+
+def cmd_help():
+    print("Commands:")
+    print("  set path <path>   - set path to Wave.exe")
+    print("  set delay <secs>  - set restart interval")
+    print("  start             - begin restart automation")
+    print("  stop              - stop automation")
+    print("  status            - show current config/state")
+    print("  help              - show this message")
+    print("  exit              - quit")
+
+
+def main():
+    print("Wave Controller shell. Type 'help' for commands.")
+    while True:
+        try:
+            raw = input("wave> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            _stop_flag.set()
+            sys.exit(0)
+
+        if not raw:
+            continue
+
+        try:
+            parts = shlex.split(raw)
+        except ValueError as e:
+            print(f"[wave] parse error: {e}")
+            continue
+
+        cmd, args = parts[0].lower(), parts[1:]
+
+        if cmd == "start":
+            cmd_start()
+        elif cmd == "stop":
+            cmd_stop()
+        elif cmd == "status":
+            cmd_status()
+        elif cmd == "set":
+            cmd_set(args)
+        elif cmd in ("help", "?"):
+            cmd_help()
+        elif cmd in ("exit", "quit", "q"):
+            _stop_flag.set()
+            break
+        else:
+            print(f"[wave] unknown command '{cmd}' (try 'help')")
 
 
 if __name__ == "__main__":
-    if not acquire_single_instance_lock():
-      
-        try:
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                "Wave Controller is already running.\nCheck your system tray.",
-                "Already Running",
-                0x40,
-            )
-        except Exception:
-            pass
-        sys.exit(0)
-
-    root = tk.Tk()
-    app = WaveManagerApp(root)
-    root.mainloop()
+    main()
