@@ -6,14 +6,13 @@ import time
 import os
 import sys
 import ctypes
-import winreg  # only works on windows, that's fine since this whole thing is windows-only anyway
-
+import winreg  
 try:
     import pygetwindow as gw
     HAVE_GW = True
 except ImportError:
     HAVE_GW = False
-    # not fatal, we just won't be able to restore focus after relaunch
+    
 
 try:
     import pystray
@@ -21,22 +20,19 @@ try:
     HAVE_TRAY = True
 except ImportError:
     HAVE_TRAY = False
-    # not fatal, we just won't have a system tray icon
+   
 
-APP_NAME = "WaveController"  # used as the key name in the registry Run key
+APP_NAME = "WaveController"  
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".wavecontroller_config")
 
-# --- COMMON INSTALL LOCATIONS TO TRY IF NO PATH IS SAVED YET ---
+
 DEFAULT_PATH_GUESSES = [
     "C:/Program Files/Wave/Wave.exe",
     "C:/Program Files (x86)/Wave/Wave.exe",
 ]
 
 
-# ------------------------------------------------------------------
-# SINGLE INSTANCE LOCK
-# ------------------------------------------------------------------
 def acquire_single_instance_lock():
     """Uses a named Windows mutex so a second copy can't run at once.
     Returns True if this is the only instance, False if another is already running."""
@@ -46,11 +42,7 @@ def acquire_single_instance_lock():
     return ctypes.GetLastError() != ERROR_ALREADY_EXISTS
 
 
-# ------------------------------------------------------------------
-# CONFIG PERSISTENCE (path, delay, last on/off state)
-# ------------------------------------------------------------------
 def load_config():
-    # format: line1=path, line2=delay, line3=was_running ("1"/"0")
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -62,7 +54,7 @@ def load_config():
         except Exception:
             pass
 
-    # no config yet - try to auto-detect a common install location
+   
     for guess in DEFAULT_PATH_GUESSES:
         if os.path.exists(guess):
             return guess, "120", False
@@ -74,7 +66,7 @@ def save_config(path, delay, was_running):
         with open(CONFIG_FILE, "w") as f:
             f.write(path + "\n" + delay + "\n" + ("1" if was_running else "0") + "\n")
     except Exception:
-        pass  # not critical if this fails
+        pass  
 
 
 def is_in_startup():
@@ -95,8 +87,7 @@ def set_startup(enabled):
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
     if enabled:
-        # figure out how to relaunch ourselves - if frozen (exe) use that, otherwise
-        # call python with this script's path
+     
         if getattr(sys, "frozen", False):
             cmd = f'"{sys.executable}"'
         else:
@@ -141,21 +132,14 @@ class WaveManagerApp:
 
         self.build_ui()
 
-        # handle the window's X button - minimize to tray instead of quitting,
-        # so the automation loop keeps running quietly in the background
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
         if HAVE_TRAY:
             self.start_tray_icon()
 
-        # resume whatever state the app was in last time it closed, rather
-        # than always forcing it on just because the path exists
         self._pending_resume = was_running
         self.root.after(300, self.autostart)
 
-    # ------------------------------------------------------------------
-    # UI
-    # ------------------------------------------------------------------
     def build_ui(self):
         path_frame = tk.LabelFrame(self.root, text=" Application Settings ", padx=10, pady=10)
         path_frame.pack(fill="x", padx=15, pady=10)
@@ -201,7 +185,7 @@ class WaveManagerApp:
             set_startup(self.startup_var.get())
         except Exception as e:
             messagebox.showerror("Startup Error", f"Couldn't update startup setting:\n{e}")
-            # flip the checkbox back since it didn't actually work
+          
             self.startup_var.set(not self.startup_var.get())
 
     def browse_file(self):
@@ -212,9 +196,6 @@ class WaveManagerApp:
         if filename:
             self.exe_path.set(filename)
 
-    # ------------------------------------------------------------------
-    # TRAY ICON
-    # ------------------------------------------------------------------
     def start_tray_icon(self):
         menu = pystray.Menu(
             pystray.MenuItem("Show Wave Controller", self.show_from_tray, default=True),
@@ -240,7 +221,6 @@ class WaveManagerApp:
         if HAVE_TRAY:
             self.root.withdraw()
         else:
-            # no tray support available, so just minimize instead of hiding completely
             self.root.iconify()
 
     def show_from_tray(self, icon=None, item=None):
@@ -259,12 +239,8 @@ class WaveManagerApp:
             self.tray_icon.stop()
         self.root.after(0, self.root.destroy)
 
-    # ------------------------------------------------------------------
-    # AUTOMATION
-    # ------------------------------------------------------------------
     def autostart(self):
-        # only resume automatically if the path is valid AND that's the state
-        # the app was left in last time (don't force it on just because it can)
+
         if self._pending_resume and os.path.exists(self.exe_path.get()):
             self.toggle_state()
 
@@ -332,7 +308,7 @@ class WaveManagerApp:
                     try:
                         previous_window.activate()
                     except Exception:
-                        pass  # window might've closed, whatever
+                        pass  
 
                 if not self.is_running:
                     break
@@ -351,8 +327,7 @@ class WaveManagerApp:
 
 if __name__ == "__main__":
     if not acquire_single_instance_lock():
-        # another copy is already running - just bring attention to that instead
-        # of launching a duplicate that would fight over the same process
+      
         try:
             ctypes.windll.user32.MessageBoxW(
                 0,
